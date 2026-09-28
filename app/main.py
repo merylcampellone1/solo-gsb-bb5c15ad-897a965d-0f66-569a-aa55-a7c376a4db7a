@@ -10,7 +10,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import engine, feasibility, reconciliation, retraction, scenarios, sensitivity
+from . import (
+    calibration,
+    engine,
+    feasibility,
+    reconciliation,
+    retraction,
+    scenarios,
+    sensitivity,
+)
 from .db import db, init_db
 from .importer import import_payload, reset_all
 
@@ -20,7 +28,7 @@ STATIC_DIR = BASE_DIR / "static"
 app = FastAPI(
     title="事件证据链审计台",
     description="导入多来源 JSON 事件记录，校正时钟偏差，重建可解释时间线并定位冲突链。",
-    version="1.5.0",
+    version="1.6.0",
 )
 
 
@@ -102,6 +110,14 @@ class ReconcileBody(BaseModel):
     source_a: str
     source_b: str
     tolerance_ms: Any                    # 在 reconcile 内严格校验（非负/有限/数值）
+    overrides: dict[str, SourceAssumption] = Field(default_factory=dict)
+
+
+class AnchorCalibrationBody(BaseModel):
+    """锚点校准：指定待校准/参照来源与 1～20 对人工确认的同一动作事件。"""
+    calibrated_source: str
+    reference_source: str
+    anchors: list[dict[str, Any]]        # 在 calibrate 内严格校验（数量/重复/来源/失效）
     overrides: dict[str, SourceAssumption] = Field(default_factory=dict)
 
 
@@ -464,6 +480,28 @@ def source_reconciliation(body: ReconcileBody) -> dict[str, Any]:
         return reconciliation.reconcile_sources(
             body.source_a, body.source_b, body.tolerance_ms, overrides)
     except reconciliation.ReconcileError as exc:
+        raise HTTPException(404 if "不存在" in str(exc) else 400, str(exc)) from exc
+
+
+@app.post("/api/anchor-calibration")
+def anchor_calibration(body: AnchorCalibrationBody) -> dict[str, Any]:
+    """锚点校准（只读，不写数据库）。
+
+    审计员从双来源对账结果中勾选 1～20 对已配对且确认是同一真实动作的
+    事件，指定一个来源为待校准方、另一个为参照方。后端复用当前含未保存
+    调整的事件时间区间（漂移与不确定度固定），对每对锚点求使两个闭区间
+    相交的待校准方 clock_offset 增量范围，再取所有范围的交集：非空时给出
+    允许的绝对 offset 范围（页面可一键采用中点写入左栏未保存假设），为空时
+    列出分别决定冲突上、下界的两对锚点。锚点重复 / 事件失效 / 来源不一致
+    返回 4xx 明确报错。
+    """
+    overrides = {sid: v.model_dump(exclude_none=True)
+                 for sid, v in body.overrides.items()}
+    try:
+        return calibration.calibrate_offset(
+            body.calibrated_source, body.reference_source,
+            body.anchors, overrides)
+    except calibration.CalibrationError as exc:
         raise HTTPException(404 if "不存在" in str(exc) else 400, str(exc)) from exc
 
 

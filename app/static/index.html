@@ -184,7 +184,8 @@
       <p class="subtitle">选择两个<b>不同来源</b>与非负容差（毫秒），复用当前时钟校正区间（含左栏<b>未保存</b>调整）做只读对账：
         仅 <b>actor 非空且相同、事件类型相同、两侧闭区间间距不超过容差</b>（时间量统一四舍五入到整数毫秒）的事件可配对；
         每条事件最多参与一对，<b>先最大化配对数，再最小化区间中点差绝对值之和</b>（全局最优，非逐条贪心），同优按事件 ID 稳定输出。
-        每侧最多 200 条事件。不新增约束、不合并记录；调整假设后可重新对账。点击任意事件 ID 回到主时间线定位。</p>
+        每侧最多 200 条事件。不新增约束、不合并记录；调整假设后可重新对账。点击任意事件 ID 回到主时间线定位。
+        对账后可在结果中勾选 1～20 对确认是同一动作的配对做 <b>🎯 锚点校准</b>：求待校准来源使每对闭区间相交的 offset 范围交集。</p>
       <div class="overlay-actions">
         <button class="btn tiny primary" id="recon-rerun">⟳ 重新对账</button>
         <button class="btn tiny ghost" id="recon-close">✕ 关闭</button>
@@ -208,6 +209,21 @@
     </div>
 
     <div id="recon-result" class="cmp-result"></div>
+
+    <!-- 锚点校准（在对账结果中勾选已确认的同一动作对后使用） -->
+    <div id="anchor-panel" class="anchor-panel hidden">
+      <div class="anchor-toolbar">
+        <span class="cmp-side-tag a" style="background:rgba(232,163,61,.16);color:#f0c273;border-color:#6e5323">🎯 锚点校准</span>
+        <span class="anchor-hint">勾选 1～20 对<b>已配对且确认是同一动作</b>的事件，指定待校准方（仅调整其 clock_offset；漂移与不确定度固定为当前生效值），求使每对闭区间相交的 offset 范围交集。</span>
+        <span class="anchor-side">待校准方
+          <label><input type="radio" name="anchor-cal-side" value="a"> 来源 A</label>
+          <label><input type="radio" name="anchor-cal-side" value="b" checked> 来源 B</label>
+        </span>
+        <span class="stat">已选 <b id="anchor-count">0</b>/20</span>
+        <button class="btn tiny primary" id="anchor-run">▶ 计算允许 offset 范围</button>
+      </div>
+      <div id="anchor-result"></div>
+    </div>
   </div>
 </div>
 
@@ -217,5 +233,6 @@
 <script src="/static/feasibility.js"></script>
 <script src="/static/retraction.js"></script>
 <script src="/static/reconciliation.js"></script>
+<script src="/static/calibration.js"></script>
 </body>
 </html>

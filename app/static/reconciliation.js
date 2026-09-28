@@ -8,6 +8,10 @@ const reconState = {
 };
 const recon$ = (sel) => document.querySelector(sel);
 
+/* 锚点勾选集合：键为 "A事件ID|B事件ID"（对账结果按 A 排序，方向稳定）。
+   锚点校准模块（calibration.js）通过 recon:rendered 事件与之解耦同步。 */
+const anchorSelection = new Set();
+
 /* --------------------------------------------------------------- 开关 */
 
 function reconOpen() {
@@ -81,6 +85,9 @@ async function reconRun() {
     return;
   }
   reconState.result = await res.json();
+  // 重新对账后清理已不存在于配对结果的旧锚点选择
+  const valid = new Set(reconState.result.pairs.map((p) => `${p.a.id}|${p.b.id}`));
+  for (const k of [...anchorSelection]) if (!valid.has(k)) anchorSelection.delete(k);
   reconRender();
 }
 
@@ -107,6 +114,8 @@ function reconRender() {
   // 点击任意事件 ID：关抽屉并在主时间线定位
   box.querySelectorAll("[data-eid]").forEach((n) =>
     n.addEventListener("click", () => { reconClose(); focusEvent(n.dataset.eid); }));
+  // 通知锚点校准模块同步勾选状态 / 面板可见性
+  document.dispatchEvent(new CustomEvent("recon:rendered", { detail: d }));
 }
 
 function reconSummary(d) {
@@ -152,7 +161,8 @@ function reconPairsBlock(d) {
   const blk = el("div", "cmp-block");
   const n = d.pairs.length;
   blk.innerHTML = `<h3>已配对事件
-    <span class="cmp-count">${n} 对 · 按 A 侧事件 ID 稳定排序；时间差为 B 中点 − A 中点</span></h3>`;
+    <span class="cmp-count">${n} 对 · 按 A 侧事件 ID 稳定排序；时间差为 B 中点 − A 中点。
+    勾选确认是<b>同一真实动作</b>的配对可用于下方 🎯 锚点校准</span></h3>`;
   if (!n) {
     blk.appendChild(el("div", "cmp-empty", "没有满足条件的配对（actor 相同 / 类型相同 / 闭区间间距 ≤ 容差）"));
     return blk;
@@ -160,10 +170,15 @@ function reconPairsBlock(d) {
   const list = el("div", "recon-pairs");
   for (const p of d.pairs) {
     const row = el("div", "recon-pair");
+    const key = `${p.a.id}|${p.b.id}`;
     const gapCls = p.closed_gap_ms === 0 ? "touch" : "gap";
     row.innerHTML = `
       ${reconEventCell(p.a, "a")}
       <div class="recon-delta">
+        <label class="anchor-check" title="勾选：确认这对事件是同一真实动作，可用于锚点校准">
+          <input type="checkbox" class="anchor-cb" data-a="${esc(p.a.id)}" data-b="${esc(p.b.id)}"
+                 ${anchorSelection.has(key) ? "checked" : ""}> 锚点
+        </label>
         <div class="recon-delta-main ${p.mid_delta_ms >= 0 ? "pos" : "neg"}"
              title="B 区间中点 − A 区间中点（整数毫秒）">${esc(reconMsText(p.mid_delta_ms))}</div>
         <div class="recon-delta-abs">|Δ| ${p.mid_delta_abs_ms} ms</div>
