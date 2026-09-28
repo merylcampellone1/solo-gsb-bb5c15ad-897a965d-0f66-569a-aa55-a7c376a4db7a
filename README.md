@@ -32,6 +32,12 @@
    做跨来源事件一一配对（actor 相同 / 类型相同 / 闭区间间距不超过容差），
    全局最优（先最大化配对数、再最小化中点差之和，非逐条贪心），并支持页面
    未保存的时钟假设。
+10. **锚点校准**：在对账结果上勾选 1～20 对**已配对且人工确认是同一动作**的事件，
+    指定一侧来源为待校准方、另一侧为参照；复用当前含未保存调整的事件时间区间
+    （**固定漂移与不确定度**），逐对求使两侧闭区间相交的待校准方 **offset 增量**
+    范围，再取所有范围的**交集**。交集为空时明确列出分别决定冲突上下界的两对锚点；
+    非空时给出允许的绝对 offset 范围，"采用中点"只写入左栏**未保存**假设并重算时间线
+    （仍可放弃调整）。锚点重复、事件失效或来源不一致一律明确报错。
 
 ---
 
@@ -73,6 +79,7 @@ python tests/test_sensitivity.py # 纯标准库，覆盖偏移敏感性：临界
 python tests/test_feasibility.py # 纯标准库，覆盖全局时序可行性：DAG 传播 / 环交集 / 矛盾路径 / 5000 事件无递归
 python tests/test_retraction.py  # 纯标准库，覆盖约束撤销建议：最少撤销 / 多解 / 平行边 / 保护与预算限制
 python tests/test_reconciliation.py # 纯标准库，覆盖双来源对账：整数毫秒四舍五入 / 闭区间间距 / 全局最优反贪心 / 同优稳定输出 / 200 上限与拒绝
+python tests/test_anchor_calibration.py # 纯标准库，覆盖锚点校准：单对范围 / 闭区间边界 / 多锚点交集 / 冲突上下界锚点 / 漂移固定 / 未保存 offset / 0.5ms 中点 / 重复·失效·来源不一致报错 / 1～20 限制
 ```
 
 ---
@@ -206,6 +213,35 @@ python tests/test_reconciliation.py # 纯标准库，覆盖双来源对账：整
    400 并明确告知两侧条数，**不做静默截断**；两侧选同一来源、来源不存在、
    负 / 非数值 / NaN / 无穷容差同样以 4xx 明确拒绝。
 
+### 进一步：锚点校准（🎯，在对账抽屉内）
+
+对账给出的配对是"候选"，审计员确认其中若干对确为**同一真实动作**后，可以用它们
+反推待校准来源的时钟偏差：在对账结果中勾选 **1～20 对**已配对事件（每对左侧
+"锚点"复选框），在 🎯 **锚点校准**区块指定 **A 或 B 为待校准方**（另一方作参照），
+点 **▶ 计算可行 offset**（API 为 `POST /api/anchor-calibration`）：
+
+1. **区间复用、漂移与不确定度固定**：所有事件时间区间都取当前生效假设
+   （库存 + 左栏**未保存**的 offset / drift / uncertainty）下的结果；校准只允许
+   对待校准来源的 clock_offset 施加一个**统一增量** δ（其全部事件区间整体平移 -δ），
+   不重新拟合漂移、不改不确定度——需要调整这两者时在左栏改完再重新对账/校准；
+2. **单对锚点的可行增量**（整数毫秒闭区间，half-up 取整后做整数比较）：
+   待校准方区间 [lo_c, hi_c]、参照方 [lo_r, hi_r]，平移后两闭区间相交（含相接）当且仅当
+   `δ ∈ [lo_c − hi_r, hi_c − lo_r]`；
+3. **取所有锚点范围的交集** `[max loᵢ, min hiᵢ]`：
+   - **非空**：显示允许的 **offset 增量范围**与换算后的**绝对 offset 范围**
+     （当前生效 offset + 增量，毫秒与秒两种单位）、当前 offset 与**中点建议**；
+     点 **✍ 采用中点**仅把待校准来源的未保存 offset 写为中点并**立即重算时间线**
+     （与手动在左栏改值等价，可继续微调、💾 保存或"放弃调整"），不关闭数据库写入路径；
+   - **为空**：明确列出**分别决定冲突上下界的两对锚点**（下界锚点 = 提供最大下界、
+     上界锚点 = 提供最小上界）及各自允许增量，并在逐锚点列表中标注"冲突下界/上界锚点"，
+     提示审计员复核这两对是否确为同一动作、来源归属是否正确，或漂移/不确定度假设是否需要修正；
+4. **逐锚点明细**：每对锚点给出事件 ID（可点击回主时间线定位）、各自的增量范围、
+   "当前区间是否已相交"，以及在非空时标记"决定交集下界/上界"的锚点；
+5. **明确报错**：锚点 0 对或超过 20 对、同一对重复、同一侧事件参与多对、
+   两个事件 ID 相同、事件已被删除（失效）、事件不属于声明的 A/B 来源（来源不一致）、
+   两侧来源相同 / 来源不存在、`calibrated_side` 不是 `a`/`b`，均返回 4xx 并逐条说明；
+6. **只读**：计算本身不写数据库、不改写事件或假设；重新对账会自动丢弃已失效的旧锚点选择。
+
 ---
 
 ## 输入 JSON 格式
@@ -324,6 +360,10 @@ gap ∈ [ lo_b - hi_a ,  hi_b - lo_a ]
   再最小化中点差绝对值之和（Kuhn+匈牙利全局最优，非逐条贪心），同优按事件 ID 稳定输出；
   页面列出配对（中点差 / 闭区间间距）与两侧未匹配事件，点击任意 ID 回主时间线定位；
   只读，不新增约束、不合并记录；每侧最多 200 条，超限明确拒绝。
+- **锚点校准**（对账抽屉内 🎯）：勾选 1～20 对已配对且确认同一动作的事件并指定待校准方，
+  复用含未保存调整的区间（固定漂移与不确定度），逐对求闭区间相交所需的 offset 增量范围
+  再取交集；非空时显示绝对 offset 范围，"采用中点"只更新左栏未保存假设并重算时间线（可放弃）；
+  为空时列出决定冲突上下界的两对锚点；锚点重复 / 事件失效 / 来源不一致明确报错，只读不写库。
 
 ---
 
@@ -353,6 +393,7 @@ gap ∈ [ lo_b - hi_a ,  hi_b - lo_a ]
 | POST | `/api/temporal-feasibility` | 全局时序可行性：全量事件区间 × 全部约束联立求解，返回最早可行时刻见证或矛盾路径 |
 | POST | `/api/retraction-suggestions` | 约束撤销建议：沿矛盾路径搜索需撤销的最少人工/导入约束，原求解器复核，返回至多 5 个同样最少的方案及撤销后全量可行见证（只读预览） |
 | POST | `/api/source-reconciliation` | 双来源事件对账：复用校正区间（含未保存假设），按 actor/类型/闭区间容差做全局最优一一配对，返回配对（中点差/闭区间间距）与两侧未匹配事件（只读，每侧 ≤200，超限 400） |
+| POST | `/api/anchor-calibration` | 锚点校准：1～20 对已配对锚点 + 待校准方（a/b），复用含未保存调整的区间（固定漂移/不确定度），逐对求闭区间相交的待校准方 offset 增量范围并取交集；非空返回绝对 offset 范围与中点，为空返回决定冲突上下界的两对锚点（只读，锚点重复/事件失效/来源不一致 4xx） |
 | GET | `/api/sample` | 下载内置示例 JSON |
 | POST | `/api/reset` | 清空全部数据 |
 | GET | `/api/health` | 健康检查（Compose healthcheck 使用） |
@@ -606,6 +647,88 @@ curl -o audit_result.json http://localhost:8000/api/export
 - 结果**按 A 侧事件 ID 稳定排序**（并列按 B 侧 ID），未匹配列表同样按 ID 排序；
 - 4xx：两侧相同 / 来源不存在（404）/ 容差为负或非有限数值 / 任一侧事件数 > 200（消息含实际条数）。
 
+`/api/anchor-calibration` 请求体与响应示例（只读；`overrides` 传页面当前含未保存的时钟假设；
+`calibrated_side` 为待校准方 `"a"` 或 `"b"`，`anchors` 为 1～20 对、a/b 对应对账结果两侧事件 ID）：
+
+```json
+// POST /api/anchor-calibration
+{"source_a": "s1", "source_b": "s2", "calibrated_side": "a",
+ "anchors": [{"a": "a1", "b": "b1"}, {"a": "a2", "b": "b2"}],
+ "overrides": {}}
+```
+
+```json
+// 可行（feasible=true）：intersection 给出增量范围 / 绝对 offset 范围 / 中点
+{
+  "calibration_type": "anchor-offset-calibration",
+  "feasible": true,
+  "sides": {"a": {"source_id": "s1", "source_name": "S1"},
+            "b": {"source_id": "s2", "source_name": "S2"}},
+  "calibrated_side": "a", "reference_side": "b",
+  "calibrated_source_id": "s1", "calibrated_source_name": "S1",
+  "reference_source_id": "s2", "reference_source_name": "S2",
+  "anchor_count": 2,
+  "current_offset_seconds": 0.0, "current_offset_ms": 0,
+  "intersection": {
+    "delta_range_ms": {"lo": -1000, "hi": -1000},
+    "delta_range_seconds": {"lo": -1.0, "hi": -1.0},
+    "delta_midpoint_ms": -1000, "delta_midpoint_seconds": -1.0,
+    "absolute_offset_range_ms": {"lo": -1000, "hi": -1000},
+    "absolute_offset_range_seconds": {"lo": -1.0, "hi": -1.0},
+    "absolute_offset_midpoint_ms": -1000,
+    "absolute_offset_midpoint_seconds": -1.0
+  },
+  "conflict": null,
+  "anchors": [{"index": 0, "a": {"id": "a1", "...": "..."}, "b": {"id": "b1", "...": "..."},
+               "calibrated_event": {"id": "a1", "...": "..."},
+               "reference_event": {"id": "b1", "...": "..."},
+               "delta_range_ms": {"lo": -1000, "hi": -1000},
+               "delta_range_seconds": {"lo": -1.0, "hi": -1.0},
+               "absolute_offset_range_seconds": {"lo": -1.0, "hi": -1.0},
+               "intersects_currently": false}],
+  "notice": "漂移与不确定度固定不变……采用中点仅写入左栏未保存假设并重算时间线，仍可放弃调整。"
+}
+```
+
+```json
+// 不可行（feasible=false）：conflict 给出分别决定下界/上界的两对锚点及各自范围
+{
+  "calibration_type": "anchor-offset-calibration",
+  "feasible": false,
+  "intersection": null,
+  "summary": "2 对锚点的 offset 增量范围没有公共交集：下界锚点要求 δ ≥ 2000 ms（a2 ↔ b2），上界锚点要求 δ ≤ -1000 ms（a1 ↔ b1），相差 3000 ms。……",
+  "conflict": {
+    "lower_anchor": {"index": 1, "a": {"id": "a2"}, "b": {"id": "b2"},
+                     "calibrated_event": {"id": "a2", "event_type": "...", "actor": "..."},
+                     "reference_event": {"id": "b2"},
+                     "delta_range_ms": {"lo": 2000, "hi": 2000}, "...": "..."},
+    "upper_anchor": {"index": 0, "a": {"id": "a1"}, "b": {"id": "b1"},
+                     "delta_range_ms": {"lo": -1000, "hi": -1000}, "...": "..."}
+  },
+  "anchors": [ /* 同可行形态，按请求顺序，含 intersects_currently */ ]
+}
+```
+
+- 单对锚点的增量范围（整数毫秒闭区间）为 `δ ∈ [lo_c − hi_r, hi_c − lo_r]`，
+  其中 c 为待校准方事件、r 为参照方事件；交集为 `[max loᵢ, min hiᵢ]`，
+  `feasible` 当且仅当 `max lo ≤ min hi`；
+- 增量为正表示"待校准来源本地时钟比当前假设的还要快"（clock_offset 需增大）；
+  绝对 offset = 当前生效 offset（含未保存调整）+ 增量；中点为整数毫秒和的
+  向下取整（端点和为奇时即 0.5ms 粒度）；
+- 端点与对账同款 half-up 取整到整数毫秒后做整数比较，浮点误差不影响边界；
+- 4xx/404：0 对或 >20 对锚点、锚点对重复、同一事件在同侧参与多对、两 ID 相同、
+  `calibrated_side` 非 a/b、事件不存在（失效，404 语义）或不属于所声明来源、
+  两侧来源相同 / 来源不存在。
+
+curl 示例：
+
+```bash
+curl -X POST http://localhost:8000/api/anchor-calibration \
+  -H 'Content-Type: application/json' \
+  -d '{"source_a":"s1","source_b":"s2","calibrated_side":"a",
+       "anchors":[{"a":"a1","b":"b1"}]}'
+```
+
 交互式文档：启动后访问 `http://localhost:8000/docs`。
 
 ---
@@ -615,11 +738,12 @@ curl -o audit_result.json http://localhost:8000/api/export
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 路由：导入/假设/重算/筛选/约束/方案 CRUD/对比/敏感性/时序可行性/撤销建议/导出/静态页
+│   ├── main.py          # FastAPI 路由：导入/假设/重算/筛选/约束/方案 CRUD/对比/敏感性/时序可行性/撤销建议/对账/锚点校准/导出/静态页
 │   ├── engine.py        # 区间模型、边分类、约束传播、Tarjan 环、歧义聚类、稳定签名、导出
 │   ├── feasibility.py   # 全局时序可行性：差分约束联立求解（SCC + Kahn 最长路）、最早可行时刻见证、矛盾路径
 │   ├── retraction.py    # 约束撤销建议：沿矛盾路径的冲突驱动最小撤销搜索，原求解器复核，预算/深度限制
 │   ├── reconciliation.py # 双来源事件对账：复用校正区间，整数毫秒四舍五入，Kuhn+匈牙利全局最优一一配对（反贪心/稳定输出/每侧200）
+│   ├── anchor_calibration.py # 锚点校准：1～20 对锚点逐对求闭区间相交的 offset 增量范围并取交集，冲突锚点定位，绝对 offset/中点（只读）
 │   ├── scenarios.py     # 命名假设方案快照 CRUD、双方案重算差异（冲突/歧义/边/时间线/参数）
 │   ├── sensitivity.py   # 偏移敏感性：临界点解析求解、稳定区间切分、逐段重算与差异配对
 │   ├── importer.py      # 多别名宽松 JSON 规范化、幂等入库、来源时序边重建
@@ -634,6 +758,7 @@ curl -o audit_result.json http://localhost:8000/api/export
 ├── tests/test_feasibility.py # 全局时序可行性测试（11 项，含 5000 事件规模与深环无递归）
 ├── tests/test_retraction.py  # 约束撤销建议测试（12 项：最少撤销/多解/平行边/保护与预算限制）
 ├── tests/test_reconciliation.py # 双来源事件对账测试（22 项：舍入/闭区间/反贪心/同优稳定/上限拒绝/未保存假设）
+├── tests/test_anchor_calibration.py # 锚点校准测试（21 项：单对范围/闭区间边界/交集/冲突锚点/漂移固定/未保存 offset/0.5ms 中点/重复·失效·来源不一致/1～20 限制）
 ├── docker/entrypoint.sh # 启动钩子：初始化数据库后拉起 uvicorn
 ├── Dockerfile
 ├── docker-compose.yml

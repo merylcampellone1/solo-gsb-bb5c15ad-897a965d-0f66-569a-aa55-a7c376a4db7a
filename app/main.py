@@ -10,7 +10,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import engine, feasibility, reconciliation, retraction, scenarios, sensitivity
+from . import (
+    anchor_calibration,
+    engine,
+    feasibility,
+    reconciliation,
+    retraction,
+    scenarios,
+    sensitivity,
+)
 from .db import db, init_db
 from .importer import import_payload, reset_all
 
@@ -20,7 +28,7 @@ STATIC_DIR = BASE_DIR / "static"
 app = FastAPI(
     title="事件证据链审计台",
     description="导入多来源 JSON 事件记录，校正时钟偏差，重建可解释时间线并定位冲突链。",
-    version="1.5.0",
+    version="1.6.0",
 )
 
 
@@ -102,6 +110,20 @@ class ReconcileBody(BaseModel):
     source_a: str
     source_b: str
     tolerance_ms: Any                    # 在 reconcile 内严格校验（非负/有限/数值）
+    overrides: dict[str, SourceAssumption] = Field(default_factory=dict)
+
+
+class AnchorItem(BaseModel):
+    a: str
+    b: str
+
+
+class AnchorCalibrationBody(BaseModel):
+    """锚点校准：1～20 对已配对事件 + 待校准方（a|b），可携带未保存假设。"""
+    source_a: str
+    source_b: str
+    calibrated_side: str                 # "a" | "b"，在 calibrate 内严格校验
+    anchors: list[AnchorItem]
     overrides: dict[str, SourceAssumption] = Field(default_factory=dict)
 
 
@@ -463,6 +485,30 @@ def source_reconciliation(body: ReconcileBody) -> dict[str, Any]:
     try:
         return reconciliation.reconcile_sources(
             body.source_a, body.source_b, body.tolerance_ms, overrides)
+    except reconciliation.ReconcileError as exc:
+        raise HTTPException(404 if "不存在" in str(exc) else 400, str(exc)) from exc
+
+
+# ----------------------------------------------------- 锚点校准（对账结果上）
+
+@app.post("/api/anchor-calibration")
+def anchor_calibrate(body: AnchorCalibrationBody) -> dict[str, Any]:
+    """对账锚点校准（只读，不写数据库、不改写事件或假设）。
+
+    审计员勾选 1～20 对已配对且确认同一动作的事件，指定一侧为待校准方、
+    另一侧为参照；复用当前含未保存调整的事件时间区间（漂移/不确定度固定），
+    逐对求使两侧闭区间相交的待校准方 offset 增量范围，再取所有范围的交集。
+    交集为空时返回分别决定冲突上下界的两对锚点及范围；非空时返回允许的
+    绝对 offset 范围与中点（前端"采用中点"只更新左栏未保存假设并重算时间线）。
+    锚点重复、事件失效（已删除）或来源不一致均以 4xx 明确拒绝。
+    """
+    overrides = {sid: v.model_dump(exclude_none=True)
+                 for sid, v in body.overrides.items()}
+    anchors = [{"a": it.a, "b": it.b} for it in body.anchors]
+    try:
+        return anchor_calibration.calibrate_anchors(
+            body.source_a, body.source_b, body.calibrated_side,
+            anchors, overrides)
     except reconciliation.ReconcileError as exc:
         raise HTTPException(404 if "不存在" in str(exc) else 400, str(exc)) from exc
 
